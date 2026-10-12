@@ -8,17 +8,6 @@ const PORT = process.env.PORT || 3000;
 const wss = new WebSocket.Server({ server: server });
 const clientes = new Map(); 
 
-function gerarCodigoUnico() {
-    let codigo;
-
-    do {
-        codigo = String(
-            Math.floor(Math.random() * 900000) + 100000
-        );
-    } while (clientes.has(codigo));
-
-    return codigo;
-}
 
 wss.on('connection', (ws) => {
   console.log('Client connected');
@@ -26,25 +15,18 @@ wss.on('connection', (ws) => {
   ws.on('message', (message) => {
    const dados = JSON.parse(message);
     if (dados.type === "tornar-servidor") {
-    removerCodigoDoCliente(ws);
-
-    
-    const codigo = gerarCodigoUnico();
-
-   
-    clientes.set(codigo, ws);
-    ws.codigoTornarServidor = codigo;
-
-   
-    ws.send(JSON.stringify({
-        type: "codigo-gerado",
-        codigo: codigo
-    }));
-}
-    else if (dados.type === "conectar") {
-      const codigoRecebido = String(dados.codigo ?? "").trim();
-const clienteServidor = clientes.get(codigoRecebido);
-    
+ if (ws.codigoTornarServidor) {
+        clientes.delete(ws.codigoTornarServidor);
+    }
+   let de = 100000;
+    let ate = 999999;
+      let codigo = Math.floor(Math.random() * (ate - de + 1)) + de;
+       clientes.set(codigo, ws);
+       ws.codigoTornarServidor = codigo;
+      ws.send(JSON.stringify({ type: "codigo-gerado", codigo: codigo }));   
+      
+    }else if (dados.type === "conectar") {
+    const clienteServidor = clientes.get(dados.codigo);
     ws.send(JSON.stringify({ type: "codigo-recebido", codigo: dados.codigo }));
     if (clienteServidor === ws) {
   enviarErro(
@@ -58,7 +40,7 @@ const clienteServidor = clientes.get(codigoRecebido);
         ws.send(JSON.stringify({ type: "conectado" ,sucesso: true, mensagem: "Conexão estabelecida com sucesso!" }));
          clienteServidor.send(JSON.stringify({ type: "dispositivo-conectou" }));
       }
-       else if(clienteServidor === undefined){
+        if(clienteServidor === undefined){
           ws.send(JSON.stringify({ type: "erro" , sucesso: false, mensagem: "Código inválido" }));
         }
     }
