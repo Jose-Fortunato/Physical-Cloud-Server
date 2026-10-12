@@ -28,7 +28,7 @@ wss.on('connection', (ws) => {
     }else if (dados.type === "conectar") {
     const clienteServidor = clientes.get(dados.codigo);
     ws.send(JSON.stringify({ type: "codigo-recebido", codigo: dados.codigo }));
-    if (clienteServidor === ws) {
+    if (clienteServidor === ws.codigoTornarServidor) {
   enviarErro(
     ws,
     'AUTO_CONEXAO',
