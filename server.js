@@ -41,6 +41,7 @@ wss.on('connection', (ws) => {
 
     // Converte o texto JSON para objeto JavaScript
     const dados = JSON.parse(texto);
+    if (dados.type === "ping") return; // ignora o ping criado no front
 
     // ─── Tipo: "tornar-servidor" ───────────────────────────────────────────────
     // O cliente quer se registrar como dispositivo servidor (quem vai receber conexões)
@@ -104,7 +105,7 @@ codigo = String(codigo);
         ws.send(JSON.stringify({ type: "erro", sucesso: false, mensagem: "Código inválido" }));
       }
     }
-if (dados.type === "ping") return; // só ignora
+
     console.log(`Received message: ${message}`);
   });
 
