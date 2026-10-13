@@ -58,19 +58,19 @@ wss.on('connection', (ws) => {
       let codigo;
       do {
         codigo = Math.floor(Math.random() * (ate - de + 1)) + de;
-       
+        
       } while (clientes.has(codigo));
- String(codigo);
+codigo = String(codigo);
       // Registra o cliente no mapa com o código gerado
-    clientes.set(String(codigo), ws);
+    clientes.set(codigo, ws);
 
 
       // Guarda o código do botão Se tornar dispositivo servidor que é uma string na própria conexão WebSocket para referência futura
       // (útil para remover do mapa quando o cliente desconectar ou trocar de código)
-      ws.codigoTornarServidor = String(codigo);
+      ws.codigoTornarServidor = codigo;
 
       // Envia o código gerado em forma de String de volta para o cliente
-      ws.send(JSON.stringify({ type: "codigo-gerado", codigo: String(codigo) }));
+      ws.send(JSON.stringify({ type: "codigo-gerado", codigo: codigo }));
 
     // ─── Tipo: "conectar" ─────────────────────────────────────────────────────
     // O cliente quer se conectar a um dispositivo servidor usando um código
@@ -78,17 +78,17 @@ wss.on('connection', (ws) => {
 
       // Impede que o cliente se conecte ao próprio código
       if (ws.codigoTornarServidor !== undefined &&
-        String(dados.codigo) === ws.codigoTornarServidor
+        dados.codigo === ws.codigoTornarServidor
       ) {
         ws.send(JSON.stringify({ type: "erro", sucesso: false, mensagem: "Você não pode conectar ao próprio dispositivo servidor." }));
         return;
       }
-
+      
       // Busca no mapa a conexão WebSocket do dispositivo servidor com aquele código
-      const clienteServidor = clientes.get(String(dados.codigo));
+      const clienteServidor = clientes.get(dados.codigo);
 
       // Confirma para o cliente que o código foi recebido (independente de ser válido ou não)
-      ws.send(JSON.stringify({ type: "codigo-recebido", codigo: String(dados.codigo) }));
+      ws.send(JSON.stringify({ type: "codigo-recebido", codigo: dados.codigo }));
 
       // Verifica se o dispositivo servidor existe e está com a conexão aberta
       if (clienteServidor && clienteServidor.readyState === WebSocket.OPEN) {
