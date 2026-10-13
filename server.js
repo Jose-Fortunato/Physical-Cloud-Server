@@ -75,6 +75,7 @@ codigo = String(codigo);
 
     // ─── Tipo: "conectar" ─────────────────────────────────────────────────────
     // O cliente quer se conectar a um dispositivo servidor usando um código
+     // ─── Não funciona, n recebe os o "conectar" ───────────────────────────────────────────────
     } else if (dados.type === "conectar") {
        console.log("Tentando conectar com código:", JSON.stringify(dados.codigo));
   console.log("Clientes registrados:", [...clientes.keys()]);
