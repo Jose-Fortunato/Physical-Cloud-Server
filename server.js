@@ -75,6 +75,9 @@ codigo = String(codigo);
     // ─── Tipo: "conectar" ─────────────────────────────────────────────────────
     // O cliente quer se conectar a um dispositivo servidor usando um código
     } else if (dados.type === "conectar") {
+       console.log("Tentando conectar com código:", JSON.stringify(dados.codigo));
+  console.log("Clientes registrados:", [...clientes.keys()]);
+  console.log("Tipos:", typeof dados.codigo, [...clientes.keys()].map(k => typeof k));
 
       // Impede que o cliente se conecte ao próprio código
       if (ws.codigoTornarServidor !== undefined &&
@@ -101,7 +104,7 @@ codigo = String(codigo);
         ws.send(JSON.stringify({ type: "erro", sucesso: false, mensagem: "Código inválido" }));
       }
     }
-
+if (dados.type === "ping") return; // só ignora
     console.log(`Received message: ${message}`);
   });
 
