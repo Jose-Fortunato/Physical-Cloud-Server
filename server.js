@@ -4,127 +4,149 @@
 const WebSocket = require('ws');
 // Importa o módulo HTTP nativo do Node.js para criar o servidor base
 const http = require('http');
+// Gerador de números aleatórios criptograficamente seguro
+const { randomInt } = require('crypto');
 
-// Cria um servidor HTTP simples (usado como base para o WebSocket)
-// Responde com "Server Ping OK" em qualquer requisição HTTP normal
+// Servidor HTTP simples (base do WebSocket). Responde "Server Ping OK" em requisições normais
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end('Server Ping OK');
 });
 
-// Porta onde o servidor vai rodar (usa variável de ambiente ou 3000 como padrão)
 const PORT = process.env.PORT || 3000;
 
 // Cria o servidor WebSocket em cima do servidor HTTP
 const wss = new WebSocket.Server({ server: server });
 
-// Mapa que associa código numérico → conexão WebSocket do dispositivo servidor
-// Ex: { 123456: ws_do_dispositivo_A }
+// Mapa: código (string de 6 dígitos) → conexão WebSocket do dispositivo servidor
 const clientes = new Map();
 
+// Máximo de tentativas de código inválido por conexão (proteção contra força bruta)
+const MAX_TENTATIVAS = 10;
+
+// ─── Segurança contra quedas do processo ─────────────────────────────────────
+// Se algo escapar dos try/catch, loga o erro em vez de derrubar o servidor
+// (derrubar = perder o mapa "clientes" = todos os códigos viram inválidos)
+process.on('uncaughtException', (err) => console.error('uncaughtException:', err));
+process.on('unhandledRejection', (err) => console.error('unhandledRejection:', err));
+
+// ─── Heartbeat: detecta e remove conexões mortas ─────────────────────────────
+// O navegador responde ping automaticamente com pong
+const heartbeat = setInterval(() => {
+  wss.clients.forEach((ws) => {
+    const sock = /** @type {any} */ (ws);
+    if (sock.isAlive === false) {
+      ws.terminate(); // dispara o evento 'close' e limpa o código do mapa
+      return;
+    }
+    sock.isAlive = false;
+    ws.ping();
+  });
+}, 30000);
+wss.on('close', () => clearInterval(heartbeat));
+
+// Envia JSON com segurança (só se o socket estiver aberto)
+/** @param {WebSocket} ws @param {object} obj */
+function enviar(ws, obj) {
+  if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+}
 
 // Evento disparado toda vez que um novo cliente se conecta via WebSocket
 wss.on('connection', (ws) => {
+  // Cast para permitir propriedades próprias (evita erro do @ts-check)
+  const sock = /** @type {any} */ (ws);
+  sock.isAlive = true;
+  sock.tentativas = 0;
   console.log('Client connected');
 
-  // Evento disparado quando uma mensagem chega desse cliente
+  ws.on('pong', () => { sock.isAlive = true; });
+  ws.on('error', (err) => console.error('WS error:', err));
+
   ws.on('message', (message) => {
+    sock.isAlive = true; // qualquer mensagem prova que o cliente está vivo
 
-    // Converte a mensagem recebida para string UTF-8.
-    // A mensagem pode chegar como string, Buffer, ArrayBuffer ou array de Buffers
-    // dependendo da versão do ws e do cliente, por isso os três casos.
-    const texto = typeof message === 'string'
-      ? message
-      : Array.isArray(message)
-        ? Buffer.concat(message).toString('utf8')
-        : Buffer.from(message instanceof ArrayBuffer ? new Uint8Array(message) : message).toString('utf8');
+    // No ws v8+ a mensagem chega como Buffer; toString() converte para UTF-8
+    const texto = message.toString('utf8');
 
-    // Converte o texto JSON para objeto JavaScript
-    const dados = JSON.parse(texto);
+    // JSON.parse protegido: mensagem inválida não derruba mais o servidor
+    let dados;
+    try {
+      dados = JSON.parse(texto);
+    } catch {
+      enviar(ws, { type: "erro", sucesso: false, mensagem: "Mensagem inválida" });
+      return;
+    }
+    if (!dados || typeof dados !== "object") return;
     if (dados.type === "ping") return; // ignora o ping criado no front
 
-    // ─── Tipo: "tornar-servidor" ───────────────────────────────────────────────
-    // O cliente quer se registrar como dispositivo servidor (quem vai receber conexões)
+    // ─── Tipo: "tornar-servidor" ─────────────────────────────────────────────
     if (dados.type === "tornar-servidor") {
 
-      // Se este cliente já tinha um código anterior, remove do mapa antes de gerar um novo
-      if (ws.codigoTornarServidor !== undefined &&
-          clientes.get(ws.codigoTornarServidor) === ws) {
-        clientes.delete(ws.codigoTornarServidor);
+      // Remove o código anterior deste cliente, se existir
+      if (sock.codigoTornarServidor !== undefined &&
+          clientes.get(sock.codigoTornarServidor) === ws) {
+        clientes.delete(sock.codigoTornarServidor);
       }
 
-      // Gera um código aleatório de 6 dígitos que ainda não esteja em uso
-      let de = 100000;
-      let ate = 999999;
+      // Gera um código de 6 dígitos que ainda não esteja em uso
       let codigo;
       do {
-        codigo = Math.floor(Math.random() * (ate - de + 1)) + de;
-        
+        codigo = String(randomInt(100000, 1000000)); // 100000 a 999999
       } while (clientes.has(codigo));
-codigo = String(codigo);
-      // Registra o cliente no mapa com o código gerado
-    clientes.set(codigo, ws);
 
+      clientes.set(codigo, ws);
+      sock.codigoTornarServidor = codigo;
 
-      // Guarda o código do botão Se tornar dispositivo servidor que é uma string na própria conexão WebSocket para referência futura
-      // (útil para remover do mapa quando o cliente desconectar ou trocar de código)
-      ws.codigoTornarServidor = codigo;
+      console.log(`Código ${codigo} criado. Códigos ativos:`, [...clientes.keys()]);
+      enviar(ws, { type: "codigo-gerado", codigo: codigo });
 
-      // Envia o código gerado em forma de String de volta para o cliente
-      ws.send(JSON.stringify({ type: "codigo-gerado", codigo: codigo }));
-
-    // ─── Tipo: "conectar" ─────────────────────────────────────────────────────
-    // O cliente quer se conectar a um dispositivo servidor usando um código
-     // ─── Não funciona, n recebe os o "conectar" ───────────────────────────────────────────────
+    // ─── Tipo: "conectar" ────────────────────────────────────────────────────
     } else if (dados.type === "conectar") {
-       console.log("Tentando conectar com código:", JSON.stringify(dados.codigo));
-  console.log("Clientes registrados:", [...clientes.keys()]);
-  console.log("Tipos:", typeof dados.codigo, [...clientes.keys()].map(k => typeof k));
+      const codigoInserido = String(dados.codigo).trim();
 
-      // Impede que o cliente se conecte ao próprio código
-      if (ws.codigoTornarServidor !== undefined &&
-        dados.codigo === ws.codigoTornarServidor
-      ) {
-        ws.send(JSON.stringify({ type: "erro", sucesso: false, mensagem: "Você não pode conectar ao próprio dispositivo servidor." }));
+      // Limite de tentativas inválidas por conexão
+      if (sock.tentativas >= MAX_TENTATIVAS) {
+        enviar(ws, { type: "erro", sucesso: false, mensagem: "Muitas tentativas. Recarregue a página." });
         return;
       }
-      
-      // Busca no mapa a conexão WebSocket do dispositivo servidor com aquele código
-      const clienteServidor = clientes.get(dados.codigo);
 
-      // Confirma para o cliente que o código foi recebido (independente de ser válido ou não)
-      ws.send(JSON.stringify({ type: "codigo-recebido", codigo: dados.codigo }));
+      // Impede conectar ao próprio código
+      if (sock.codigoTornarServidor !== undefined && codigoInserido === sock.codigoTornarServidor) {
+        enviar(ws, { type: "erro", sucesso: false, mensagem: "Você não pode conectar ao próprio dispositivo servidor." });
+        return;
+      }
 
-      // Verifica se o dispositivo servidor existe e está com a conexão aberta
+      const clienteServidor = clientes.get(codigoInserido);
+
+      // Log de diagnóstico: mostra o que foi procurado e o que existe no mapa
+      console.log(`Procurando: ${codigoInserido} | Códigos ativos:`, [...clientes.keys()]);
+
+      enviar(ws, { type: "codigo-recebido", codigo: dados.codigo });
+
       if (clienteServidor && clienteServidor.readyState === WebSocket.OPEN) {
-        // Avisa o cliente conectante que a conexão foi bem-sucedida
-        ws.send(JSON.stringify({ type: "conectado", sucesso: true, mensagem: "Conexão estabelecida com sucesso!" }));
-        // Avisa o dispositivo servidor que alguém acabou de se conectar a ele
-        clienteServidor.send(JSON.stringify({ type: "dispositivo-conectou" }));
+        sock.tentativas = 0;
+        enviar(ws, { type: "conectado", sucesso: true, mensagem: "Conexão estabelecida com sucesso!" });
+        enviar(clienteServidor, { type: "dispositivo-conectou" });
       } else {
-        // Código não encontrado ou dispositivo servidor offline
-        ws.send(JSON.stringify({ type: "erro", sucesso: false, mensagem: "Código inválido" }));
+        sock.tentativas++;
+        // Mensagem diferenciada para facilitar o diagnóstico
+        const mensagem = clienteServidor
+          ? "Dispositivo servidor está offline"
+          : "Código inválido ou expirado";
+        enviar(ws, { type: "erro", sucesso: false, mensagem });
       }
     }
-
-    console.log(`Received message: ${message}`);
   });
 
-  // Evento disparado quando o cliente se desconecta
+  // Quando o cliente se desconecta, remove o código dele do mapa
   ws.on('close', () => {
-    // Se esse cliente era um dispositivo servidor, remove seu código do mapa
-    // para que o código não fique "ocupado" indefinidamente
-    if (ws.codigoTornarServidor !== undefined &&
-      clientes.get(ws.codigoTornarServidor) === ws
-    ) {
-      clientes.delete(ws.codigoTornarServidor);
+    if (sock.codigoTornarServidor !== undefined && clientes.get(sock.codigoTornarServidor) === ws) {
+      clientes.delete(sock.codigoTornarServidor);
+      console.log(`Código servidor ${sock.codigoTornarServidor} limpo do mapa.`);
     }
   });
 });
 
-console.log('WebSocket server is running on ws://localhost:3000');
-
-// Inicia o servidor HTTP (e junto com ele o WebSocket) na porta configurada
 server.listen(PORT, () => {
   console.log(`WebSocket Server rodando na porta ${PORT}`);
 });
