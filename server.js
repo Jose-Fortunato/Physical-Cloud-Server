@@ -6,11 +6,19 @@ const WebSocket = require('ws');
 const http = require('http');
 // Gerador de números aleatórios criptograficamente seguro
 const { randomInt } = require('crypto');
+// Troque este texto a cada commit para saber qual versão está no ar
+const VERSAO = "2026-10-16-v3";
 
+// O Render define estas variáveis automaticamente (confirme em Environment > default variables na doc deles)
+const COMMIT = process.env.RENDER_GIT_COMMIT
+  ? process.env.RENDER_GIT_COMMIT.slice(0, 7)
+  : "local";
+const BRANCH = process.env.RENDER_GIT_BRANCH || "local";
+const INICIO = new Date().toISOString();
 // Servidor HTTP simples (base do WebSocket). Responde "Server Ping OK" em requisições normais
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Server Ping OK');
+  res.end(`Server Ping OK\nversao: ${VERSAO}\ncommit: ${COMMIT}\nbranch: ${BRANCH}\niniciado em: ${INICIO}`);
 });
 
 const PORT = process.env.PORT || 3000;
@@ -148,5 +156,5 @@ wss.on('connection', (ws) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`WebSocket Server rodando na porta ${PORT}`);
+  console.log(`=== SERVIDOR INICIADO | versao ${VERSAO} | commit ${COMMIT} | branch ${BRANCH} | porta ${PORT} ===`);
 });
