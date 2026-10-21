@@ -1,20 +1,10 @@
 // @ts-check
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Physical Cloud - servidor de sinalização
-// Este servidor NÃO guarda nem toca em arquivos. Ele só:
-//   1) cria códigos para dispositivos servidores,
-//   2) controla quem pode conectar em quem (com aprovação),
-//   3) repassa as mensagens de ligação (WebRTC) entre os dois aparelhos.
-// Depois da ligação, os arquivos viajam direto de um aparelho para o outro.
-// ═══════════════════════════════════════════════════════════════════════════
-
 const WebSocket = require('ws');
 const http = require('http');
 const { randomInt, randomUUID } = require('crypto');
 
-// Troque este texto a cada commit para saber qual versão está no ar
-const VERSAO = "2026-10-19-v4-sessoes";
+const VERSAO = "2026-10-20-v5-etapa1";
 
 const COMMIT = process.env.RENDER_GIT_COMMIT
   ? process.env.RENDER_GIT_COMMIT.slice(0, 7)
@@ -23,29 +13,25 @@ const BRANCH = process.env.RENDER_GIT_BRANCH || "local";
 const INICIO = new Date().toISOString();
 const PORT = process.env.PORT || 3000;
 
-// ─── Configurações ───────────────────────────────────────────────────────────
 const NA_RENDER = Boolean(process.env.RENDER || process.env.RENDER_GIT_COMMIT);
 
-// Sites autorizados a usar este servidor. Para adicionar outros sem mexer no código,
-// use a variável de ambiente ORIGENS_EXTRAS (separadas por vírgula).
 const ORIGENS_PERMITIDAS = new Set([
   "https://josefortunato-coder.github.io",
   ...(process.env.ORIGENS_EXTRAS || "").split(",").map((s) => s.trim()).filter(Boolean),
 ]);
 
-const TTL_CODIGO_MS = 5 * 60 * 1000;      // código vale 5 minutos
-const TTL_PEDIDO_MS = 60 * 1000;          // o servidor tem 60s para aprovar um pedido
-const MAX_CLIENTES_POR_SERVIDOR = 3;      // quantos aparelhos podem usar o mesmo servidor
-const MAX_SERVIDORES_POR_CLIENTE = 5;     // a quantos servidores um aparelho pode se ligar
-const MAX_FALHAS_POR_CONEXAO = 10;        // códigos errados por conexão
-const MAX_FALHAS_POR_IP = 20;             // códigos errados por IP (a cada 10 min)
+const TTL_CODIGO_MS = 5 * 60 * 1000;
+const TTL_PEDIDO_MS = 60 * 1000;
+const MAX_CLIENTES_POR_SERVIDOR = 3;
+const MAX_SERVIDORES_POR_CLIENTE = 5;
+const MAX_FALHAS_POR_CONEXAO = 10;
+const MAX_FALHAS_POR_IP = 20;
 const JANELA_FALHAS_IP_MS = 10 * 60 * 1000;
-const MAX_CONEXOES_POR_IP = 10;           // conexões abertas ao mesmo tempo por IP
-const MAX_MENSAGENS_POR_JANELA = 200;     // mensagens a cada 10s por conexão
+const MAX_CONEXOES_POR_IP = 10;
+const MAX_MENSAGENS_POR_JANELA = 200;
 const JANELA_MENSAGENS_MS = 10 * 1000;
-const MAX_PAYLOAD_BYTES = 64 * 1024;      // mensagens são só texto pequeno
+const MAX_PAYLOAD_BYTES = 64 * 1024;
 
-// ─── Estado (só em memória: se o servidor reiniciar, tudo recomeça) ──────────
 /** código → { ws, expiraEm } */
 const codigos = new Map();
 /** sessaoId → sessão entre um servidor e um cliente */
@@ -55,22 +41,17 @@ const conexoesPorIp = new Map();
 /** ip → { n, inicio } falhas de código */
 const falhasPorIp = new Map();
 
-// ─── Servidor HTTP e WebSocket ───────────────────────────────────────────────
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end(`Server Ping OK\nversao: ${VERSAO}\ncommit: ${COMMIT}\nbranch: ${BRANCH}\niniciado em: ${INICIO}`);
+  res.end(`OK`);
 });
 
 const wss = new WebSocket.Server({ server: server, maxPayload: MAX_PAYLOAD_BYTES });
 
-// Se algo escapar dos try/catch, loga em vez de derrubar o processo
 process.on('uncaughtException', (err) => console.error('uncaughtException:', err));
 process.on('unhandledRejection', (err) => console.error('unhandledRejection:', err));
 
-// ─── Funções auxiliares ──────────────────────────────────────────────────────
-
 /**
- * Envia JSON só se o socket estiver aberto
  * @param {WebSocket} ws
  * @param {{ type: string; sucesso?: boolean; mensagem?: any; sessaoId?: any; motivo?: any; codigo?: string; expiraEm?: number; validadeSegundos?: number; nome?: any; permissao?: any; dados?: any; }} obj
  */
@@ -92,22 +73,24 @@ function erro(ws, mensagem) {
 function origemPermitida(origem) {
   if (!origem) return false;
   if (ORIGENS_PERMITIDAS.has(origem)) return true;
-  // Em testes no seu computador (fora do Render), aceita localhost
   if (!NA_RENDER && /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origem)) return true;
   return false;
 }
 
 /**
- * IP do visitante. Atrás do proxy do Render, vem no cabeçalho x-forwarded-for
+ * Bug #3 corrigido: usa o último IP do x-forwarded-for (não o primeiro, que é forjável pelo cliente)
  * @param {http.IncomingMessage} req
  */
 function obterIp(req) {
   const xff = req.headers['x-forwarded-for'];
-  const primeiro = typeof xff === 'string' ? xff.split(',')[0].trim() : '';
-  return primeiro || (req.socket && req.socket.remoteAddress) || 'desconhecido';
+  if (typeof xff === 'string') {
+    const partes = xff.split(',');
+    const ultimo = partes[partes.length - 1].trim();
+    if (ultimo) return ultimo;
+  }
+  return (req.socket && req.socket.remoteAddress) || 'desconhecido';
 }
 
-// Validações dos campos recebidos
 /**
  * @param {string} v
  */
@@ -152,7 +135,6 @@ function registrarFalhaIp(ip) {
 }
 
 /**
- * Remove o código de um dispositivo servidor (se ele tiver um)
  * @param {WebSocket} ws
  */
 function removerCodigo(ws) {
@@ -165,7 +147,7 @@ function removerCodigo(ws) {
 }
 
 /**
- * Conta sessões de um aparelho como "servidor" ou como "cliente"
+ * Bug #2 corrigido: conta apenas sessões ativas (não pendentes)
  * @param {WebSocket} ws
  * @param {string} papel
  */
@@ -174,13 +156,12 @@ function contarSessoes(ws, papel) {
   let n = 0;
   for (const id of sock.sessoes) {
     const s = sessoes.get(id);
-    if (s && s[papel] === ws) n++;
+    if (s && s[papel] === ws && s.estado === 'ativa') n++;
   }
   return n;
 }
 
 /**
- * Encerra uma sessão e avisa o outro lado (quem encerrou não é avisado)
  * @param {string} sessaoId
  * @param {string} motivo
  * @param {WebSocket | undefined} [quemEncerrou]
@@ -197,9 +178,7 @@ function encerrarSessao(sessaoId, motivo, quemEncerrou) {
   }
 }
 
-// ─── Rotina a cada 30s: heartbeat, códigos expirados e limpeza ───────────────
 const rotina = setInterval(() => {
-  // Heartbeat: derruba conexões que não respondem (o navegador responde ping sozinho)
   wss.clients.forEach((ws) => {
     const sock = /** @type {any} */ (ws);
     if (sock.isAlive === false) { ws.terminate(); return; }
@@ -207,7 +186,6 @@ const rotina = setInterval(() => {
     ws.ping();
   });
 
-  // Códigos vencidos
   const agora = Date.now();
   for (const [codigo, entrada] of codigos) {
     if (entrada.expiraEm <= agora) {
@@ -217,28 +195,23 @@ const rotina = setInterval(() => {
     }
   }
 
-  // Limpa contadores antigos de falhas por IP
   for (const [ip, f] of falhasPorIp) {
     if (agora - f.inicio > JANELA_FALHAS_IP_MS) falhasPorIp.delete(ip);
   }
 }, 30000);
 wss.on('close', () => clearInterval(rotina));
 
-// ─── Conexões ────────────────────────────────────────────────────────────────
 wss.on('connection', (ws, req) => {
   const sock = /** @type {any} */ (ws);
 
-  // O handler de erro vem primeiro: sem ele, um erro de socket pode derrubar o processo
   ws.on('error', (err) => console.error('WS error:', err.message));
 
-  // 1) Só aceita conexões vindas do seu site
   if (!origemPermitida(req.headers.origin)) {
     console.warn('Origem bloqueada:', req.headers.origin);
     ws.close(1008, 'Origem não permitida');
     return;
   }
 
-  // 2) Limite de conexões simultâneas por IP
   const ip = obterIp(req);
   const abertas = conexoesPorIp.get(ip) || 0;
   if (abertas >= MAX_CONEXOES_POR_IP) {
@@ -260,9 +233,8 @@ wss.on('connection', (ws, req) => {
 
   ws.on('message', (message, isBinary) => {
     sock.isAlive = true;
-    if (isBinary) return; // só aceitamos texto
+    if (isBinary) return;
 
-    // Limite de mensagens por conexão (evita flood)
     const agora = Date.now();
     if (agora - sock.janelaInicio > JANELA_MENSAGENS_MS) {
       sock.janelaInicio = agora;
@@ -287,13 +259,12 @@ wss.on('connection', (ws, req) => {
       case "ping":
         return;
 
-      // ── Este aparelho quer ser servidor: gera um código ───────────────────
       case "tornar-servidor": {
         const deviceId = validarDeviceId(dados.deviceId);
         if (!deviceId) return erro(ws, "Identificador do dispositivo inválido");
         sock.deviceId = deviceId;
 
-        removerCodigo(ws); // troca o código antigo por um novo
+        removerCodigo(ws);
 
         let codigo;
         do {
@@ -308,7 +279,6 @@ wss.on('connection', (ws, req) => {
         return;
       }
 
-      // ── Este aparelho quer conectar num servidor usando um código ─────────
       case "conectar": {
         const codigo = validarCodigo(dados.codigo);
         const deviceId = validarDeviceId(dados.deviceId);
@@ -321,7 +291,6 @@ wss.on('connection', (ws, req) => {
           return erro(ws, "Muitas tentativas. Aguarde alguns minutos.");
         }
 
-        // Procura o código (e descarta se já venceu)
         let entrada = codigos.get(codigo);
         if (entrada && entrada.expiraEm <= Date.now()) {
           codigos.delete(codigo);
@@ -338,12 +307,10 @@ wss.on('connection', (ws, req) => {
         const servidorWs = entrada.ws;
         const servidorSock = /** @type {any} */ (servidorWs);
 
-        // Não pode conectar no próprio aparelho (mesma conexão ou mesmo deviceId)
         if (servidorWs === ws || servidorSock.deviceId === deviceId) {
           return erro(ws, "Você não pode conectar ao próprio dispositivo servidor.");
         }
 
-        // Já existe pedido ou conexão com esse servidor?
         for (const id of sock.sessoes) {
           const s = sessoes.get(id);
           if (s && s.servidor === servidorWs && s.cliente === ws) {
@@ -351,7 +318,6 @@ wss.on('connection', (ws, req) => {
           }
         }
 
-        // Limites de quantidade
         if (contarSessoes(servidorWs, 'servidor') >= MAX_CLIENTES_POR_SERVIDOR) {
           return erro(ws, "Este servidor já atingiu o limite de dispositivos conectados.");
         }
@@ -359,7 +325,6 @@ wss.on('connection', (ws, req) => {
           return erro(ws, "Você já atingiu o limite de servidores conectados.");
         }
 
-        // Cria o pedido. A conexão só vale depois que o servidor aprovar.
         sock.falhas = 0;
         const sessaoId = randomUUID();
         const sessao = {
@@ -384,7 +349,6 @@ wss.on('connection', (ws, req) => {
         return;
       }
 
-      // ── O servidor aprova ou recusa um pedido ─────────────────────────────
       case "responder-pedido": {
         const sessaoId = validarSessaoId(dados.sessaoId);
         const s = sessaoId ? sessoes.get(sessaoId) : undefined;
@@ -401,6 +365,9 @@ wss.on('connection', (ws, req) => {
         s.estado = 'ativa';
         s.permissao = dados.permissao === 'leitura-escrita' ? 'leitura-escrita' : 'leitura';
 
+        // Bug #1 corrigido: remove o código do Map após aprovação
+        removerCodigo(ws);
+
         enviar(s.cliente, {
           type: "conectado", sucesso: true, sessaoId, permissao: s.permissao,
           mensagem: "Conexão estabelecida com sucesso!",
@@ -409,7 +376,6 @@ wss.on('connection', (ws, req) => {
         return;
       }
 
-      // ── Repasse das mensagens de ligação (WebRTC) entre os dois aparelhos ─
       case "sinal": {
         const sessaoId = validarSessaoId(dados.sessaoId);
         const s = sessaoId ? sessoes.get(sessaoId) : undefined;
@@ -422,7 +388,6 @@ wss.on('connection', (ws, req) => {
         return;
       }
 
-      // ── Qualquer um dos dois lados encerra a sessão ───────────────────────
       case "encerrar": {
         const sessaoId = validarSessaoId(dados.sessaoId);
         const s = sessaoId ? sessoes.get(sessaoId) : undefined;
@@ -436,7 +401,6 @@ wss.on('connection', (ws, req) => {
     }
   });
 
-  // Quando o aparelho desconecta: apaga o código dele e avisa quem estava ligado a ele
   ws.on('close', () => {
     removerCodigo(ws);
     for (const id of [...sock.sessoes]) encerrarSessao(id, 'dispositivo-desconectou', ws);
