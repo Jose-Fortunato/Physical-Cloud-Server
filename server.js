@@ -4,7 +4,7 @@ const WebSocket = require('ws');
 const http = require('http');
 const { randomInt, randomUUID } = require('crypto');
 
-const VERSAO = "2026-10-20-v5-etapa1";
+const VERSAO = "2026-10-26-v11-fixes";
 
 const COMMIT = process.env.RENDER_GIT_COMMIT
   ? process.env.RENDER_GIT_COMMIT.slice(0, 7)
@@ -78,15 +78,13 @@ function origemPermitida(origem) {
 }
 
 /**
- * Bug #3 corrigido: usa o último IP do x-forwarded-for (não o primeiro, que é forjável pelo cliente)
  * @param {http.IncomingMessage} req
  */
 function obterIp(req) {
   const xff = req.headers['x-forwarded-for'];
   if (typeof xff === 'string') {
-    const partes = xff.split(',');
-    const ultimo = partes[partes.length - 1].trim();
-    if (ultimo) return ultimo;
+    const primeiro = xff.split(',')[0].trim();
+    if (primeiro) return primeiro;
   }
   return (req.socket && req.socket.remoteAddress) || 'desconhecido';
 }
@@ -102,7 +100,7 @@ function validarDeviceId(v) { return typeof v === 'string' && /^[A-Za-z0-9_-]{8,
 /**
  * @param {string} v
  */
-function validarSessaoId(v) { return typeof v === 'string' && /^[0-9a-f-]{36}$/.test(v) ? v : null; }
+function validarSessaoId(v) { return typeof v === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(v) ? v : null; }
 /**
  * @param {string} v
  */
@@ -147,7 +145,6 @@ function removerCodigo(ws) {
 }
 
 /**
- * Bug #2 corrigido: conta apenas sessões ativas (não pendentes)
  * @param {WebSocket} ws
  * @param {string} papel
  */
@@ -279,6 +276,26 @@ wss.on('connection', (ws, req) => {
         return;
       }
 
+      // [Fix.1] Nova mensagem: cliente solicita parar de ser servidor.
+      // Remove o código do Map global e confirma. Encerra também sessões pendentes
+      // (ainda no estado 'pendente') associadas a este servidor.
+      case "parar-servidor": {
+        removerCodigo(ws);
+
+        // Encerra sessões pendentes (pedidos não respondidos) deste servidor.
+        // Sessões 'ativa' já são encerradas pelo cliente via "encerrar" antes
+        // de enviar "parar-servidor", mas por segurança cobrimos as pendentes.
+        for (const id of [...sock.sessoes]) {
+          const s = sessoes.get(id);
+          if (s && s.servidor === ws && s.estado === 'pendente') {
+            encerrarSessao(id, 'pedido-expirou', ws);
+          }
+        }
+
+        enviar(ws, { type: "servidor-parado" });
+        return;
+      }
+
       case "conectar": {
         const codigo = validarCodigo(dados.codigo);
         const deviceId = validarDeviceId(dados.deviceId);
@@ -291,16 +308,30 @@ wss.on('connection', (ws, req) => {
           return erro(ws, "Muitas tentativas. Aguarde alguns minutos.");
         }
 
+        // [Fix.4/Item6] Distinguir código inexistente (conta falha) de expirado
+        // ou de servidor desconectado (não conta falha).
         let entrada = codigos.get(codigo);
+        /** @type {"nunca-existiu"|"expirado"|"desconectado"|null} */
+        let razaoInvalido = entrada ? null : "nunca-existiu";
+
         if (entrada && entrada.expiraEm <= Date.now()) {
           codigos.delete(codigo);
           /** @type {any} */ (entrada.ws).codigo = undefined;
           entrada = undefined;
+          razaoInvalido = "expirado";
+        } else if (entrada && entrada.ws.readyState !== WebSocket.OPEN) {
+          codigos.delete(codigo);
+          entrada = undefined;
+          razaoInvalido = "desconectado";
         }
 
-        if (!entrada || entrada.ws.readyState !== WebSocket.OPEN) {
-          sock.falhas++;
-          registrarFalhaIp(sock.ip);
+        if (!entrada) {
+          // Só conta como falha se o código nunca existiu (tentativa de adivinhação).
+          // Código expirado ou servidor que caiu não penalizam o cliente legítimo.
+          if (razaoInvalido === "nunca-existiu") {
+            sock.falhas++;
+            registrarFalhaIp(sock.ip);
+          }
           return erro(ws, "Código inválido ou expirado");
         }
 
@@ -365,7 +396,6 @@ wss.on('connection', (ws, req) => {
         s.estado = 'ativa';
         s.permissao = dados.permissao === 'leitura-escrita' ? 'leitura-escrita' : 'leitura';
 
-        // Bug #1 corrigido: remove o código do Map após aprovação
         removerCodigo(ws);
 
         enviar(s.cliente, {
@@ -412,5 +442,6 @@ wss.on('connection', (ws, req) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`=== SERVIDOR INICIADO | versao ${VERSAO} | commit ${COMMIT} | branch ${BRANCH} | porta ${PORT} ===`);
+  const inicioLegivel = INICIO.slice(0, 19).replace("T", " ");
+  console.log(`=== SERVIDOR INICIADO | versao ${VERSAO} | commit ${COMMIT} | branch ${BRANCH} | porta ${PORT} | inicio ${inicioLegivel} ===`);
 });
