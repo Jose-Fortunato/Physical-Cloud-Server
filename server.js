@@ -4,7 +4,7 @@ const WebSocket = require('ws');
 const http = require('http');
 const { randomInt, randomUUID } = require('crypto');
 
-const VERSAO = "2026-10-26-v11-fixes";
+const VERSAO = "2026-11-04-v12-device-memory";
 
 const COMMIT = process.env.RENDER_GIT_COMMIT
   ? process.env.RENDER_GIT_COMMIT.slice(0, 7)
@@ -40,6 +40,8 @@ const sessoes = new Map();
 const conexoesPorIp = new Map();
 /** ip → { n, inicio } falhas de código */
 const falhasPorIp = new Map();
+/** deviceId → WebSocket (Fase 1) */
+const conexoesPorDevice = new Map();
 
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
@@ -53,7 +55,7 @@ process.on('unhandledRejection', (err) => console.error('unhandledRejection:', e
 
 /**
  * @param {WebSocket} ws
- * @param {{ type: string; sucesso?: boolean; mensagem?: any; sessaoId?: any; motivo?: any; codigo?: string; expiraEm?: number; validadeSegundos?: number; nome?: any; permissao?: any; dados?: any; }} obj
+ * @param {any} obj
  */
 function enviar(ws, obj) {
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
@@ -145,6 +147,30 @@ function removerCodigo(ws) {
 }
 
 /**
+ * @param {any} sock
+ * @param {string} deviceId
+ */
+function registrarConexaoPorDevice(sock, deviceId) {
+  if (!deviceId) return;
+  if (sock.deviceId && sock.deviceId !== deviceId) {
+    const anterior = conexoesPorDevice.get(sock.deviceId);
+    if (anterior === sock) conexoesPorDevice.delete(sock.deviceId);
+  }
+  conexoesPorDevice.set(deviceId, sock);
+  sock.deviceId = deviceId;
+}
+
+/**
+ * @param {any} sock
+ */
+function removerConexaoPorDevice(sock) {
+  if (sock.deviceId) {
+    const atual = conexoesPorDevice.get(sock.deviceId);
+    if (atual === sock) conexoesPorDevice.delete(sock.deviceId);
+  }
+}
+
+/**
  * @param {WebSocket} ws
  * @param {string} papel
  */
@@ -222,6 +248,7 @@ wss.on('connection', (ws, req) => {
   sock.falhas = 0;
   sock.sessoes = new Set();
   sock.deviceId = undefined;
+  sock.nomeDispositivo = "Dispositivo";
   sock.codigo = undefined;
   sock.janelaInicio = Date.now();
   sock.msgs = 0;
@@ -259,7 +286,8 @@ wss.on('connection', (ws, req) => {
       case "tornar-servidor": {
         const deviceId = validarDeviceId(dados.deviceId);
         if (!deviceId) return erro(ws, "Identificador do dispositivo inválido");
-        sock.deviceId = deviceId;
+        registrarConexaoPorDevice(sock, deviceId);
+        if (dados.nome) sock.nomeDispositivo = limparNome(dados.nome);
 
         removerCodigo(ws);
 
@@ -276,22 +304,14 @@ wss.on('connection', (ws, req) => {
         return;
       }
 
-      // [Fix.1] Nova mensagem: cliente solicita parar de ser servidor.
-      // Remove o código do Map global e confirma. Encerra também sessões pendentes
-      // (ainda no estado 'pendente') associadas a este servidor.
       case "parar-servidor": {
         removerCodigo(ws);
-
-        // Encerra sessões pendentes (pedidos não respondidos) deste servidor.
-        // Sessões 'ativa' já são encerradas pelo cliente via "encerrar" antes
-        // de enviar "parar-servidor", mas por segurança cobrimos as pendentes.
         for (const id of [...sock.sessoes]) {
           const s = sessoes.get(id);
           if (s && s.servidor === ws && s.estado === 'pendente') {
             encerrarSessao(id, 'pedido-expirou', ws);
           }
         }
-
         enviar(ws, { type: "servidor-parado" });
         return;
       }
@@ -301,17 +321,15 @@ wss.on('connection', (ws, req) => {
         const deviceId = validarDeviceId(dados.deviceId);
         if (!codigo) return erro(ws, "O código deve ter 6 números");
         if (!deviceId) return erro(ws, "Identificador do dispositivo inválido");
-        sock.deviceId = deviceId;
+        registrarConexaoPorDevice(sock, deviceId);
         const nome = limparNome(dados.nome);
+        sock.nomeDispositivo = nome;
 
         if (sock.falhas >= MAX_FALHAS_POR_CONEXAO || ipBloqueado(sock.ip)) {
           return erro(ws, "Muitas tentativas. Aguarde alguns minutos.");
         }
 
-        // [Fix.4/Item6] Distinguir código inexistente (conta falha) de expirado
-        // ou de servidor desconectado (não conta falha).
         let entrada = codigos.get(codigo);
-        /** @type {"nunca-existiu"|"expirado"|"desconectado"|null} */
         let razaoInvalido = entrada ? null : "nunca-existiu";
 
         if (entrada && entrada.expiraEm <= Date.now()) {
@@ -326,8 +344,6 @@ wss.on('connection', (ws, req) => {
         }
 
         if (!entrada) {
-          // Só conta como falha se o código nunca existiu (tentativa de adivinhação).
-          // Código expirado ou servidor que caiu não penalizam o cliente legítimo.
           if (razaoInvalido === "nunca-existiu") {
             sock.falhas++;
             registrarFalhaIp(sock.ip);
@@ -365,6 +381,7 @@ wss.on('connection', (ws, req) => {
           estado: 'pendente',
           permissao: 'leitura',
           nome,
+          via: 'codigo',
           timer: /** @type {any} */ (null),
         };
         sessao.timer = setTimeout(() => {
@@ -375,8 +392,85 @@ wss.on('connection', (ws, req) => {
         servidorSock.sessoes.add(sessaoId);
         sock.sessoes.add(sessaoId);
 
-        enviar(ws, { type: "aguardando-aprovacao", sessaoId });
-        enviar(servidorWs, { type: "pedido-conexao", sessaoId, nome });
+        enviar(ws, { type: "aguardando-aprovacao", sessaoId, via: "codigo" });
+        enviar(servidorWs, { type: "pedido-conexao", sessaoId, nome, via: "codigo" });
+        return;
+      }
+
+      case "reconectar": {
+        const deviceId = validarDeviceId(dados.deviceId);
+        const deviceIdAlvo = validarDeviceId(dados.deviceIdAlvo);
+        if (!deviceId) return erro(ws, "Identificador do dispositivo inválido");
+        if (!deviceIdAlvo) return erro(ws, "Dispositivo alvo inválido");
+        if (deviceId === deviceIdAlvo) return erro(ws, "Você não pode reconectar a si mesmo.");
+
+        registrarConexaoPorDevice(sock, deviceId);
+        const nome = limparNome(dados.nome);
+        sock.nomeDispositivo = nome;
+
+        const alvo = conexoesPorDevice.get(deviceIdAlvo);
+        if (!alvo || alvo.readyState !== WebSocket.OPEN) {
+          return erro(ws, "Dispositivo indisponível. Abra o Physical Cloud nele para reconectar.");
+        }
+        if (alvo === ws) {
+          return erro(ws, "Você não pode reconectar a si mesmo.");
+        }
+
+        const alvoSock = /** @type {any} */ (alvo);
+
+        for (const id of sock.sessoes) {
+          const s = sessoes.get(id);
+          if (s && s.servidor === alvo && s.cliente === ws) {
+            return erro(ws, "Você já está conectado (ou aguardando aprovação) neste dispositivo.");
+          }
+        }
+
+        if (contarSessoes(alvo, 'servidor') >= MAX_CLIENTES_POR_SERVIDOR) {
+          return erro(ws, "Este dispositivo já atingiu o limite de conexões.");
+        }
+        if (contarSessoes(ws, 'cliente') >= MAX_SERVIDORES_POR_CLIENTE) {
+          return erro(ws, "Você já atingiu o limite de servidores conectados.");
+        }
+
+        const sessaoId = randomUUID();
+        const sessao = {
+          id: sessaoId,
+          servidor: alvo,
+          cliente: ws,
+          estado: 'pendente',
+          permissao: 'leitura',
+          nome,
+          via: 'reconexao',
+          timer: /** @type {any} */ (null),
+        };
+        sessao.timer = setTimeout(() => {
+          if (sessao.estado === 'pendente') encerrarSessao(sessaoId, 'pedido-expirou');
+        }, TTL_PEDIDO_MS);
+
+        sessoes.set(sessaoId, sessao);
+        alvoSock.sessoes.add(sessaoId);
+        sock.sessoes.add(sessaoId);
+
+        enviar(ws, { type: "aguardando-aprovacao", sessaoId, via: "reconexao" });
+        enviar(alvo, { type: "pedido-conexao", sessaoId, nome, via: "reconexao" });
+        return;
+      }
+
+      case "atualizar-nome": {
+        const novoNome = limparNome(dados.nome);
+        sock.nomeDispositivo = novoNome;
+        for (const id of sock.sessoes) {
+          const s = sessoes.get(id);
+          if (!s || s.estado !== 'ativa') continue;
+          if (s.servidor === ws) {
+            s.nome = novoNome;
+            enviar(s.cliente, { type: "sessao-nome-atualizado", sessaoId: id, nome: novoNome });
+          } else if (s.cliente === ws) {
+            s.nome = novoNome;
+            enviar(s.servidor, { type: "sessao-nome-atualizado", sessaoId: id, nome: novoNome });
+          }
+        }
+        enviar(ws, { type: "nome-atualizado", sucesso: true, nome: novoNome });
         return;
       }
 
@@ -398,11 +492,21 @@ wss.on('connection', (ws, req) => {
 
         removerCodigo(ws);
 
+        const servidorSock = /** @type {any} */ (ws);
+        const clienteSock = /** @type {any} */ (s.cliente);
+
         enviar(s.cliente, {
           type: "conectado", sucesso: true, sessaoId, permissao: s.permissao,
           mensagem: "Conexão estabelecida com sucesso!",
+          servidorDeviceId: servidorSock.deviceId || null,
+          servidorNome: servidorSock.nomeDispositivo || "Dispositivo servidor",
+          via: s.via || "codigo",
         });
-        enviar(ws, { type: "dispositivo-conectou", sessaoId, nome: s.nome, permissao: s.permissao });
+        enviar(ws, {
+          type: "dispositivo-conectou", sessaoId, nome: s.nome, permissao: s.permissao,
+          clienteDeviceId: clienteSock.deviceId || null,
+          via: s.via || "codigo",
+        });
         return;
       }
 
@@ -433,6 +537,7 @@ wss.on('connection', (ws, req) => {
 
   ws.on('close', () => {
     removerCodigo(ws);
+    removerConexaoPorDevice(sock);
     for (const id of [...sock.sessoes]) encerrarSessao(id, 'dispositivo-desconectou', ws);
 
     const n = (conexoesPorIp.get(sock.ip) || 1) - 1;
