@@ -283,6 +283,14 @@ wss.on('connection', (ws, req) => {
       case "ping":
         return;
 
+              case "identificar": {
+        const deviceId = validarDeviceId(dados.deviceId);
+        if (!deviceId) return;
+        registrarConexaoPorDevice(sock, deviceId);
+        if (dados.nome) sock.nomeDispositivo = limparNome(dados.nome);
+        return;
+      }
+
       case "tornar-servidor": {
         const deviceId = validarDeviceId(dados.deviceId);
         if (!deviceId) return erro(ws, "Identificador do dispositivo inválido");
