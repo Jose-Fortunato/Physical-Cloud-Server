@@ -283,14 +283,13 @@ wss.on('connection', (ws, req) => {
       case "ping":
         return;
 
-              case "identificar": {
+                case "identificar": {
         const deviceId = validarDeviceId(dados.deviceId);
         if (!deviceId) return;
         registrarConexaoPorDevice(sock, deviceId);
         if (dados.nome) sock.nomeDispositivo = limparNome(dados.nome);
         return;
       }
-
       case "tornar-servidor": {
         const deviceId = validarDeviceId(dados.deviceId);
         if (!deviceId) return erro(ws, "Identificador do dispositivo inválido");
@@ -426,13 +425,13 @@ wss.on('connection', (ws, req) => {
 
         const alvoSock = /** @type {any} */ (alvo);
 
-        for (const id of sock.sessoes) {
+               for (const id of [...sock.sessoes]) {
           const s = sessoes.get(id);
           if (s && s.servidor === alvo && s.cliente === ws) {
-            return erro(ws, "Você já está conectado (ou aguardando aprovação) neste dispositivo.");
+            // Encerra a sessão antiga para permitir a nova
+            encerrarSessao(id, 'reconectando', ws);
           }
         }
-
         if (contarSessoes(alvo, 'servidor') >= MAX_CLIENTES_POR_SERVIDOR) {
           return erro(ws, "Este dispositivo já atingiu o limite de conexões.");
         }
