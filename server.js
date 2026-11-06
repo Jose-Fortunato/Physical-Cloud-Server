@@ -462,7 +462,64 @@ wss.on('connection', (ws, req) => {
         enviar(alvo, { type: "pedido-conexao", sessaoId, nome, via: "reconexao" });
         return;
       }
+      case "reconectar-silencioso": {
+        const deviceId = validarDeviceId(dados.deviceId);
+        const deviceIdAlvo = validarDeviceId(dados.deviceIdAlvo);
+        if (!deviceId || !deviceIdAlvo) return erro(ws, "IDs inválidos para reconexão.");
 
+        registrarConexaoPorDevice(sock, deviceId);
+        const nome = limparNome(dados.nome);
+        sock.nomeDispositivo = nome;
+
+        const alvo = conexoesPorDevice.get(deviceIdAlvo);
+        if (!alvo || alvo.readyState !== WebSocket.OPEN) {
+          return erro(ws, "Dispositivo indisponível para reconexão automática.");
+        }
+        if (alvo === ws) return erro(ws, "Você não pode reconectar a si mesmo.");
+
+        const alvoSock = /** @type {any} */ (alvo);
+
+        // Encerra qualquer sessão antiga entre eles para evitar duplicação
+        for (const id of [...sock.sessoes]) {
+          const s = sessoes.get(id);
+          if (s && s.servidor === alvo && s.cliente === ws) {
+            encerrarSessao(id, 'reconectando-silencioso', ws);
+          }
+        }
+
+        const sessaoId = randomUUID();
+        const sessao = {
+          id: sessaoId,
+          servidor: alvo,
+          cliente: ws,
+          estado: 'ativa', // AQUI ESTÁ O SEGREDO: Já nasce ativa, sem pendência!
+          permissao: 'leitura-escrita',
+          nome,
+          via: 'reconexao-silenciosa',
+          timer: /** @type {any} */ (null),
+        };
+
+        sessoes.set(sessaoId, sessao);
+        alvoSock.sessoes.add(sessaoId);
+        sock.sessoes.add(sessaoId);
+
+        // Notifica o cliente (quem recarregou a página)
+        enviar(ws, {
+          type: "conectado", sucesso: true, sessaoId, permissao: sessao.permissao,
+          mensagem: "Reconexão automática estabelecida.",
+          servidorDeviceId: alvoSock.deviceId || null,
+          servidorNome: alvoSock.nomeDispositivo || "Dispositivo",
+          via: "reconexao-silenciosa",
+        });
+
+        // Notifica o servidor (o outro dispositivo) sem pedir aprovação
+        enviar(alvo, {
+          type: "dispositivo-conectou", sessaoId, nome, permissao: sessao.permissao,
+          clienteDeviceId: sock.deviceId || null,
+          via: "reconexao-silenciosa",
+        });
+        return;
+      }
       case "atualizar-nome": {
         const novoNome = limparNome(dados.nome);
         sock.nomeDispositivo = novoNome;
