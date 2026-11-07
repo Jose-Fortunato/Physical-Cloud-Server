@@ -3,8 +3,18 @@
 const WebSocket = require('ws');
 const http = require('http');
 const { randomInt, randomUUID } = require('crypto');
+const { createClient } = require('@supabase/supabase-js');
 
-const VERSAO = "2026-11-04-v12-device-memory";
+// ─── Variáveis de Ambiente ───────────────────────────────────────────────────
+const SUPABASE_URL = process.env.SUPABASE_URL || "";
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+
+// Inicializa Supabase (se as chaves estiverem configuradas)
+const supabaseAuto = (SUPABASE_URL && SUPABASE_SERVICE_KEY) 
+    ? createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY) 
+    : null;
+
+const VERSAO = "2026-11-07-v13-auto-mode";
 
 const COMMIT = process.env.RENDER_GIT_COMMIT
   ? process.env.RENDER_GIT_COMMIT.slice(0, 7)
@@ -43,6 +53,13 @@ const falhasPorIp = new Map();
 /** deviceId → WebSocket (Fase 1) */
 const conexoesPorDevice = new Map();
 
+// ─── Mapas do Modo Automático ────────────────────────────────────────────────
+/** @type {Map<string, WebSocket>} idHash → WebSocket */
+const autoIdHashToWs = new Map();
+/** @type {Map<WebSocket, string>} WebSocket → idHash */
+const wsToAutoIdHash = new Map();
+
+// @ts-ignore
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end(`OK`);
@@ -110,6 +127,13 @@ function limparNome(v) {
   if (typeof v !== 'string') return "Dispositivo";
   const limpo = v.replace(/[\u0000-\u001f\u007f<>]/g, '').trim().slice(0, 40);
   return limpo || "Dispositivo";
+}
+
+/**
+ * @param {string} h
+ */
+function isValidSha256(h) {
+  return typeof h === 'string' && /^[0-9a-f]{64}$/.test(h);
 }
 
 /**
@@ -201,6 +225,83 @@ function encerrarSessao(sessaoId, motivo, quemEncerrou) {
   }
 }
 
+// ─── Funções do Modo Automático (Supabase) ───────────────────────────────────
+
+// @ts-ignore
+async function registrarIdAutomatico(idHash, deviceId, nomeAtual, ws) {
+  if (!isValidSha256(idHash)) return { ok: false, erro: 'hash-invalido' };
+  if (typeof deviceId !== 'string' || deviceId.length < 8) return { ok: false, erro: 'device-id-invalido' };
+
+  if (supabaseAuto) {
+    const { error } = await supabaseAuto
+      .from('dispositivos_automaticos')
+      .upsert({
+        id_hash: idHash,
+        device_id: deviceId,
+        nome_atual: (nomeAtual || 'Dispositivo').slice(0, 60),
+        ativo: true,
+        ultima_atividade: new Date().toISOString()
+      }, { onConflict: 'id_hash' });
+
+    if (error) {
+      console.error('[AutoMode] Erro ao registrar no Supabase:', error.message);
+      return { ok: false, erro: 'erro-banco' };
+    }
+  }
+
+  const hashAntigo = wsToAutoIdHash.get(ws);
+  if (hashAntigo && hashAntigo !== idHash) {
+    autoIdHashToWs.delete(hashAntigo);
+  }
+  autoIdHashToWs.set(idHash, ws);
+  wsToAutoIdHash.set(ws, idHash);
+
+  console.log(`[AutoMode] Dispositivo registrado: hash=${idHash.slice(0,8)}... deviceId=${deviceId.slice(0,8)}...`);
+  return { ok: true };
+}
+
+// @ts-ignore
+async function desregistrarIdAutomatico(idHash, deviceId) {
+  if (!isValidSha256(idHash)) return { ok: false, erro: 'hash-invalido' };
+
+  if (supabaseAuto) {
+    const { error } = await supabaseAuto
+      .from('dispositivos_automaticos')
+      .update({ ativo: false, ultima_atividade: new Date().toISOString() })
+      .eq('id_hash', idHash)
+      .eq('device_id', deviceId);
+
+    if (error) {
+      console.error('[AutoMode] Erro ao desregistrar no Supabase:', error.message);
+      return { ok: false, erro: 'erro-banco' };
+    }
+  }
+
+  autoIdHashToWs.delete(idHash);
+  console.log(`[AutoMode] Dispositivo desregistrado: hash=${idHash.slice(0,8)}...`);
+  return { ok: true };
+}
+
+// @ts-ignore
+function limparAutoModoAoDesconectar(ws) {
+  const hash = wsToAutoIdHash.get(ws);
+  if (hash) {
+    autoIdHashToWs.delete(hash);
+    wsToAutoIdHash.delete(ws);
+    if (supabaseAuto) {
+      supabaseAuto
+        .from('dispositivos_automaticos')
+        .update({ ultima_atividade: new Date().toISOString() })
+        .eq('id_hash', hash)
+        .then(() => {})
+        // @ts-ignore
+        .catch(() => {});
+    }
+  }
+}
+
+// ─── Rotina de limpeza ───────────────────────────────────────────────────────
+
 const rotina = setInterval(() => {
   wss.clients.forEach((ws) => {
     const sock = /** @type {any} */ (ws);
@@ -223,6 +324,8 @@ const rotina = setInterval(() => {
   }
 }, 30000);
 wss.on('close', () => clearInterval(rotina));
+
+// ─── Conexões WebSocket ──────────────────────────────────────────────────────
 
 wss.on('connection', (ws, req) => {
   const sock = /** @type {any} */ (ws);
@@ -255,7 +358,7 @@ wss.on('connection', (ws, req) => {
 
   ws.on('pong', () => { sock.isAlive = true; });
 
-  ws.on('message', (message, isBinary) => {
+  ws.on('message', async (message, isBinary) => {
     sock.isAlive = true;
     if (isBinary) return;
 
@@ -283,13 +386,121 @@ wss.on('connection', (ws, req) => {
       case "ping":
         return;
 
-                case "identificar": {
+      case "identificar": {
         const deviceId = validarDeviceId(dados.deviceId);
         if (!deviceId) return;
         registrarConexaoPorDevice(sock, deviceId);
         if (dados.nome) sock.nomeDispositivo = limparNome(dados.nome);
         return;
       }
+
+      // ─── MODO AUTOMÁTICO ─────────────────────────────────────────────────
+      
+      case "registrar-id-automatico": {
+        const r = await registrarIdAutomatico(dados.idHash, dados.deviceId, dados.nomeAtual, ws);
+        enviar(ws, { type: 'registrar-id-automatico-ok', success: r.ok, erro: r.erro });
+        return;
+      }
+
+      case "desregistrar-id-automatico": {
+        const r = await desregistrarIdAutomatico(dados.idHash, dados.deviceId);
+        enviar(ws, { type: 'desregistrar-id-automatico-ok', success: r.ok });
+        return;
+      }
+
+      case "conectar-por-id": {
+        const idHash = dados.idHash;
+        if (!isValidSha256(idHash)) {
+          enviar(ws, { type: 'conectar-por-id-erro', motivo: 'id-invalido' });
+          return;
+        }
+
+        let nomeAlvo = "Dispositivo";
+        let deviceIdAlvo = null;
+
+        // Se o Supabase estiver configurado, busca no banco
+        if (supabaseAuto) {
+          const { data, error } = await supabaseAuto
+            .from('dispositivos_automaticos')
+            .select('device_id, nome_atual, ativo')
+            .eq('id_hash', idHash)
+            .single();
+
+          if (error || !data) {
+            enviar(ws, { type: 'conectar-por-id-erro', motivo: 'nao-encontrado' });
+            return;
+          }
+          if (!data.ativo) {
+            enviar(ws, { type: 'conectar-por-id-erro', motivo: 'modo-inativo' });
+            return;
+          }
+          nomeAlvo = data.nome_atual || "Dispositivo";
+          deviceIdAlvo = data.device_id;
+        }
+
+        // Verifica se o alvo está conectado agora
+        const alvoWs = autoIdHashToWs.get(idHash);
+        if (!alvoWs || alvoWs.readyState !== WebSocket.OPEN) {
+          enviar(ws, { type: 'conectar-por-id-erro', motivo: 'offline' });
+          return;
+        }
+
+        // Atualiza ultima_atividade no banco
+        if (supabaseAuto) {
+          supabaseAuto.from('dispositivos_automaticos')
+            .update({ ultima_atividade: new Date().toISOString() })
+            .eq('id_hash', idHash)
+            // @ts-ignore
+            .then(() => {}).catch(() => {});
+        }
+
+        // Envia confirmação para o solicitante
+        enviar(ws, {
+          type: 'conectar-por-id-encontrado',
+          nomeAlvo: nomeAlvo,
+          deviceIdAlvo: deviceIdAlvo
+        });
+
+        // Cria a sessão direto (estado 'ativa', sem modal de aprovação)
+        const sessaoId = randomUUID();
+        const sessao = {
+          id: sessaoId,
+          servidor: alvoWs,
+          cliente: ws,
+          estado: 'ativa',
+          permissao: 'leitura-escrita',
+          nome: dados.meuNome || "Dispositivo",
+          via: 'auto',
+          timer: null,
+        };
+        sessoes.set(sessaoId, sessao);
+        /** @type {any} */ (alvoWs).sessoes.add(sessaoId);
+        sock.sessoes.add(sessaoId);
+
+        // Notifica o alvo que receberá arquivos automaticamente
+        enviar(alvoWs, {
+          type: 'pedido-automatico',
+          sessaoId,
+          nomeOrigem: dados.meuNome || "Dispositivo",
+          deviceIdOrigem: dados.meuDeviceId
+        });
+
+        // Notifica o solicitante (cliente) que a sessão está pronta
+        enviar(ws, {
+          type: 'conectado',
+          sucesso: true,
+          sessaoId,
+          permissao: 'leitura-escrita',
+          mensagem: "Conectado via ID com sucesso!",
+          servidorDeviceId: deviceIdAlvo,
+          servidorNome: nomeAlvo
+        });
+        
+        return;
+      }
+
+      // ─── SESSÕES NORMAIS ─────────────────────────────────────────────────
+
       case "tornar-servidor": {
         const deviceId = validarDeviceId(dados.deviceId);
         if (!deviceId) return erro(ws, "Identificador do dispositivo inválido");
@@ -425,10 +636,9 @@ wss.on('connection', (ws, req) => {
 
         const alvoSock = /** @type {any} */ (alvo);
 
-               for (const id of [...sock.sessoes]) {
+        for (const id of [...sock.sessoes]) {
           const s = sessoes.get(id);
           if (s && s.servidor === alvo && s.cliente === ws) {
-            // Encerra a sessão antiga para permitir a nova
             encerrarSessao(id, 'reconectando', ws);
           }
         }
@@ -462,6 +672,7 @@ wss.on('connection', (ws, req) => {
         enviar(alvo, { type: "pedido-conexao", sessaoId, nome, via: "reconexao" });
         return;
       }
+
       case "reconectar-silencioso": {
         const deviceId = validarDeviceId(dados.deviceId);
         const deviceIdAlvo = validarDeviceId(dados.deviceIdAlvo);
@@ -479,7 +690,6 @@ wss.on('connection', (ws, req) => {
 
         const alvoSock = /** @type {any} */ (alvo);
 
-        // Encerra qualquer sessão antiga entre eles para evitar duplicação
         for (const id of [...sock.sessoes]) {
           const s = sessoes.get(id);
           if (s && s.servidor === alvo && s.cliente === ws) {
@@ -492,7 +702,7 @@ wss.on('connection', (ws, req) => {
           id: sessaoId,
           servidor: alvo,
           cliente: ws,
-          estado: 'ativa', // AQUI ESTÁ O SEGREDO: Já nasce ativa, sem pendência!
+          estado: 'ativa',
           permissao: 'leitura-escrita',
           nome,
           via: 'reconexao-silenciosa',
@@ -503,7 +713,6 @@ wss.on('connection', (ws, req) => {
         alvoSock.sessoes.add(sessaoId);
         sock.sessoes.add(sessaoId);
 
-        // Notifica o cliente (quem recarregou a página)
         enviar(ws, {
           type: "conectado", sucesso: true, sessaoId, permissao: sessao.permissao,
           mensagem: "Reconexão automática estabelecida.",
@@ -512,7 +721,6 @@ wss.on('connection', (ws, req) => {
           via: "reconexao-silenciosa",
         });
 
-        // Notifica o servidor (o outro dispositivo) sem pedir aprovação
         enviar(alvo, {
           type: "dispositivo-conectou", sessaoId, nome, permissao: sessao.permissao,
           clienteDeviceId: sock.deviceId || null,
@@ -520,6 +728,7 @@ wss.on('connection', (ws, req) => {
         });
         return;
       }
+
       case "atualizar-nome": {
         const novoNome = limparNome(dados.nome);
         sock.nomeDispositivo = novoNome;
@@ -602,6 +811,7 @@ wss.on('connection', (ws, req) => {
   ws.on('close', () => {
     removerCodigo(ws);
     removerConexaoPorDevice(sock);
+    limparAutoModoAoDesconectar(ws); // Limpa o Modo Automático
     for (const id of [...sock.sessoes]) encerrarSessao(id, 'dispositivo-desconectou', ws);
 
     const n = (conexoesPorIp.get(sock.ip) || 1) - 1;
@@ -613,4 +823,9 @@ wss.on('connection', (ws, req) => {
 server.listen(PORT, () => {
   const inicioLegivel = INICIO.slice(0, 19).replace("T", " ");
   console.log(`=== SERVIDOR INICIADO | versao ${VERSAO} | commit ${COMMIT} | branch ${BRANCH} | porta ${PORT} | inicio ${inicioLegivel} ===`);
+  if (!supabaseAuto) {
+    console.warn("⚠️ SUPABASE_URL e SUPABASE_SERVICE_ROLE_KEY não configurados. O Modo Conexão Automática estará desabilitado.");
+  } else {
+    console.log("✅ Supabase configurado. Modo Conexão Automática ativo.");
+  }
 });
