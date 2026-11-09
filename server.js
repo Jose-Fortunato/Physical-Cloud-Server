@@ -481,6 +481,25 @@ wss.on("connection", (ws) => {
                 break;
             }
 
+            // ── Desregistrar ID automático ──────────────────────────────────
+            case "desregistrar-id-automatico": {
+                if (!deviceId) break;
+                const idHash = String(msg.idHash || "");
+                if (!idHash) break;
+                autoHashParaDeviceId.delete(idHash);
+                try {
+                    const { error } = await supabase
+                        .from("dispositivos_automaticos")
+                        .delete()
+                        .eq("id_hash", idHash);
+                    if (error) console.error("[AutoMode] Supabase delete erro:", error.message);
+                } catch (e) {
+                    console.error("[AutoMode] Supabase delete exceção:", e);
+                }
+                console.log(`[AutoMode] Device ${deviceId} desregistrado.`);
+                break;
+            }
+
             default:
                 // Desconhecido — ignora silenciosamente
                 break;
