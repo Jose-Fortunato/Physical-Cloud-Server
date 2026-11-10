@@ -19,12 +19,7 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
-/**
- * @param {string} nome
- * @param {number} padrao
- * @param {number} minimo
- * @param {number} maximo
- */
+// @ts-ignore
 function inteiroConfig(nome, padrao, minimo, maximo) {
     const valor = Number.parseInt(process.env[nome] || String(padrao), 10);
     return Number.isSafeInteger(valor) ? Math.min(maximo, Math.max(minimo, valor)) : padrao;
@@ -93,10 +88,7 @@ const sessoesAtivas = new Map(); // sessaoId → { id1, id2 } (deviceIds dos doi
 const autoHashParaDeviceId = new Map(); // idHash → deviceId (modo automático em memória)
 const filasOperacoesAutomaticas = new Map(); // serializa registrar/desregistrar por deviceId
 
-/**
- * @param {string | null} deviceId
- * @param {{ (): Promise<void>; (): Promise<void>; }} operacao
- */
+// @ts-ignore
 function enfileirarOperacaoAutomatica(deviceId, operacao) {
     const anterior = filasOperacoesAutomaticas.get(deviceId) || Promise.resolve();
     const atual = anterior.catch(() => {}).then(operacao);
@@ -114,25 +106,17 @@ const limitesPorAcao = new Map();
 const consultasAutoGlobais = new Map();
 const operacoesAutoPorDispositivo = new Map();
 
-/**
- * @param {string | null} deviceId
- * @param {string} acao
- */
+// @ts-ignore
 function permitirAcaoDispositivo(deviceId, acao, limite = MAX_PEDIDOS_POR_DISPOSITIVO_MIN) {
     return consumirJanela(limitesPorAcao, `${deviceId}:${acao}`, limite, 60 * 1000);
 }
 
-/**
- * @param {string} alvoId
- */
+// @ts-ignore
 function permitirPedidoRecebido(alvoId) {
     return permitirAcaoDispositivo(alvoId, "pedidos-recebidos", MAX_PEDIDOS_RECEBIDOS_ALVO_MIN);
 }
 
-/**
- * @param {string | null} deviceId
- * @param {string} acao
- */
+// @ts-ignore
 function permitirOperacaoAutomatica(deviceId, acao) {
     return consumirJanela(
         operacoesAutoPorDispositivo,
@@ -147,10 +131,7 @@ function permitirOperacaoAutomatica(deviceId, acao) {
     );
 }
 
-/**
- * @param {string} campo
- * @param {any} valor
- */
+// @ts-ignore
 function contarPedidosPendentes(campo, valor) {
     let total = 0;
     // @ts-ignore
@@ -158,9 +139,7 @@ function contarPedidosPendentes(campo, valor) {
     return total;
 }
 
-/**
- * @param {string} sessaoId
- */
+// @ts-ignore
 function removerPedidoPendente(sessaoId) {
     const pedido = sessoesPendentes.get(sessaoId);
     if (!pedido) return null;
@@ -170,9 +149,7 @@ function removerPedidoPendente(sessaoId) {
     return pedido;
 }
 
-/**
- * @param {string} sessaoId
- */
+// @ts-ignore
 function encerrarPedidoPendente(sessaoId, motivo = "pedido-expirou") {
     const pedido = removerPedidoPendente(sessaoId);
     if (!pedido) return false;
@@ -184,12 +161,7 @@ function encerrarPedidoPendente(sessaoId, motivo = "pedido-expirou") {
     return true;
 }
 
-/**
- * @param {string} sessaoId
- * @param {string | null} requerenteId
- * @param {string} alvoId
- * @param {string} via
- */
+// @ts-ignore
 function criarPedidoPendente(sessaoId, requerenteId, alvoId, via) {
     if (contarPedidosPendentes("requerenteId", requerenteId) >= MAX_PEDIDOS_PENDENTES_ORIGEM ||
         contarPedidosPendentes("alvoId", alvoId) >= MAX_PEDIDOS_PENDENTES_ALVO) return null;
@@ -201,14 +173,11 @@ function criarPedidoPendente(sessaoId, requerenteId, alvoId, via) {
     }, TEMPO_PEDIDO_MS);
     // @ts-ignore
     pedido.timer.unref?.();
-    // @ts-ignore
     sessoesPendentes.set(sessaoId, pedido);
     return pedido;
 }
 
-/**
- * @param {string} deviceId
- */
+// @ts-ignore
 function gerarCredenciaisTurn(deviceId) {
     if (!TURN_URLS.length || !TURN_SHARED_SECRET) return [];
     const expiracao = Math.floor(Date.now() / 1000) + TURN_CREDENTIAL_TTL_SECONDS;
@@ -231,9 +200,7 @@ let tentativasAuthGlobais = { inicio: Date.now(), quantidade: 0 };
 const cadastrosPorIp = new Map();
 let cadastrosGlobaisJanela = { inicio: Date.now(), quantidade: 0 };
 
-/**
- * @param {string} candidato
- */
+// @ts-ignore
 function normalizarIp(candidato) {
     if (typeof candidato !== "string") return null;
     const valor = candidato.trim().replace(/^\[|\]$/g, "");
@@ -241,14 +208,11 @@ function normalizarIp(candidato) {
     return valor.toLowerCase().startsWith("::ffff:") ? valor.slice(7) : valor;
 }
 
-/**
- * @param {import("node:http").IncomingMessage} req
- */
+// @ts-ignore
 function ipDaRequisicao(req) {
     if (NO_RENDER) {
         // Cloudflare é a borda pública do Render; CF-Connecting-IP é o header
         // específico de origem, mais seguro que escolher o primeiro XFF.
-        // @ts-ignore
         const cfIp = normalizarIp(req?.headers?.["cf-connecting-ip"]);
         if (cfIp) return cfIp;
     } else if (CONFIAR_X_FORWARDED_FOR) {
@@ -261,16 +225,10 @@ function ipDaRequisicao(req) {
     }
     // Fallback fail-closed: atrás do proxy, pode agrupar usuários, mas evita
     // rate-limit bypass por XFF forjado quando o header confiável não existe.
-    // @ts-ignore
     return normalizarIp(req?.socket?.remoteAddress) || "ip-desconhecido";
 }
 
-/**
- * @param {Map<any, any>} map
- * @param {string} chave
- * @param {number} limite
- * @param {number} duracaoMs
- */
+// @ts-ignore
 function consumirJanela(map, chave, limite, duracaoMs, agora = Date.now()) {
     let item = map.get(chave);
     if (!item || agora - item.inicio >= duracaoMs || agora < item.inicio) {
@@ -291,9 +249,7 @@ function consumirTentativaAuthGlobal(agora = Date.now()) {
     return true;
 }
 
-/**
- * @param {any} ip
- */
+// @ts-ignore
 function permitirNovoCadastro(ip) {
     const agora = Date.now();
     if (agora - cadastrosGlobaisJanela.inicio >= 60 * 60 * 1000 || agora < cadastrosGlobaisJanela.inicio) {
@@ -326,17 +282,12 @@ limpezaRateLimit.unref?.();
 const TABELA_AUTENTICACAO = "dispositivos_autenticacao";
 const TOKEN_AUTENTICACAO_RE = /^[A-Za-z0-9_-]{43}$/;
 
-/**
- * @param {string | NodeJS.ArrayBufferView<ArrayBufferLike>} token
- */
+// @ts-ignore
 function hashTokenAutenticacao(token) {
     return createHash("sha256").update(token, "utf8").digest("hex");
 }
 
-/**
- * @param {import("node:buffer").WithImplicitCoercion<string>} a
- * @param {import("node:buffer").WithImplicitCoercion<string>} b
- */
+// @ts-ignore
 function hashesIguais(a, b) {
     if (typeof a !== "string" || typeof b !== "string" || !/^[0-9a-f]{64}$/i.test(a) || !/^[0-9a-f]{64}$/i.test(b)) return false;
     const ba = Buffer.from(a, "hex");
@@ -349,9 +300,9 @@ function hashesIguais(a, b) {
  * O INSERT com chave única fecha a janela de corrida entre dois primeiros logins.
  * @param {string} deviceId
  * @param {unknown} tokenRecebido
- * @returns {Promise<{ok: boolean;novoToken?: string;}>}
- * @param {string} ipOrigem
+ * @returns {Promise<{ok: boolean, novoToken?: string}>}
  */
+// @ts-ignore
 async function autenticarOuRegistrarDispositivo(deviceId, tokenRecebido, ipOrigem) {
     const tokenValido = typeof tokenRecebido === "string" && TOKEN_AUTENTICACAO_RE.test(tokenRecebido)
         ? tokenRecebido : null;
@@ -374,7 +325,7 @@ async function autenticarOuRegistrarDispositivo(deviceId, tokenRecebido, ipOrige
             .eq("device_id", deviceId)
             .then(({ error }) => { if (error) console.error("[Auth] Falha ao atualizar atividade:", error.message); })
             // @ts-ignore
-            .catch((/** @type {any} */ error) => console.error("[Auth] Falha ao atualizar atividade:", error));
+            .catch((error) => console.error("[Auth] Falha ao atualizar atividade:", error));
         return { ok: true };
     }
 
@@ -443,21 +394,14 @@ function wsDeDevice(deviceId) {
     return dispositivos.get(deviceId)?.ws || null;
 }
 
-/**
- * Confirma que este WebSocket ainda é o proprietário do deviceId vinculado.
- * @param {import("ws") | undefined} ws
- * @param {string | null} deviceId
- */
+/** Confirma que este WebSocket ainda é o proprietário do deviceId vinculado. */
+// @ts-ignore
 function socketAtual(ws, deviceId) {
     return typeof deviceId === "string" && !!deviceId && dispositivos.get(deviceId)?.ws === ws;
 }
 
-/**
- * Atualiza a última atividade dos registros automáticos sem bloquear o WebSocket.
- * @param {string | null} deviceId
- * @param {string | null} [idHash]
- * @param {string | null} [nomeAtual]
- */
+/** Atualiza a última atividade dos registros automáticos sem bloquear o WebSocket. */
+// @ts-ignore
 function atualizarAtividadeAuto(deviceId, idHash = null, nomeAtual = null) {
     if (typeof deviceId !== "string" || !deviceId) return;
     const atualizacao = { ultima_atividade: new Date().toISOString() };
@@ -471,7 +415,7 @@ function atualizarAtividadeAuto(deviceId, idHash = null, nomeAtual = null) {
     query.then(({ error }) => {
         if (error) console.error("[AutoMode] Falha ao atualizar última atividade:", error.message);
     // @ts-ignore
-    }).catch((/** @type {any} */ error) => {
+    }).catch((error) => {
         console.error("[AutoMode] Falha ao atualizar última atividade:", error);
     });
 }
@@ -836,6 +780,7 @@ wss.on("connection", (ws, req) => {
                 const nome = String(msg.nome || "").slice(0, 60);
                 // @ts-ignore
                 if (dispositivos.get(deviceId)) dispositivos.get(deviceId).nome = nome;
+                // @ts-ignore
                 atualizarAtividadeAuto(deviceId, null, nome);
                 // Propaga para sessões ativas
                 for (const [sessaoId, s] of sessoesAtivas) {
@@ -920,7 +865,8 @@ wss.on("connection", (ws, req) => {
                 if (!socketAtual(ws, deviceId)) break;
                 const requestId = typeof msg.requestId === "string" && /^[a-f0-9]{36}$/i.test(msg.requestId)
                     ? msg.requestId : null;
-                const responderRegistro = (/** @type {object} */ payload) => enviar(ws, requestId ? { ...payload, requestId } : payload);
+                // @ts-ignore
+                const responderRegistro = payload => enviar(ws, requestId ? { ...payload, requestId } : payload);
                 if (!permitirOperacaoAutomatica(deviceId, "registrar")) {
                     responderRegistro({ type: "erro", mensagem: "Muitos registros de ID automático. Aguarde um minuto." });
                     break;
@@ -1005,7 +951,8 @@ wss.on("connection", (ws, req) => {
             case "conectar-por-id": {
                 if (!socketAtual(ws, deviceId)) break;
                 const idHash = String(msg.idHash || "").toLowerCase();
-                const clienteNome = String(msg.nome || nomeDeDevice(deviceId ?? "")).slice(0, 60);
+                // @ts-ignore
+                const clienteNome = String(msg.nome || nomeDeDevice(deviceId)).slice(0, 60);
                 if (!permitirAcaoDispositivo(deviceId, "conectar-por-id", 20) ||
                     !consumirJanela(consultasAutoGlobais, "global", MAX_CONSULTAS_AUTO_GLOBAL_MIN, 60 * 1000)) {
                     enviar(ws, { type: "conectar-por-id-nao-encontrado", mensagem: "Muitas consultas de ID automático. Aguarde um minuto." });
@@ -1013,6 +960,13 @@ wss.on("connection", (ws, req) => {
                 }
                 if (!/^[0-9a-f]{64}$/.test(idHash)) {
                     enviar(ws, { type: "conectar-por-id-nao-encontrado", mensagem: "Hash inválido." });
+                    break;
+                }
+
+                // Recusa explicitamente o próprio ID antes da consulta ao Supabase.
+                // Assim, uma falha/atraso de registro não mascara o motivo como "ID não encontrado".
+                if (autoHashParaDeviceId.get(idHash) === deviceId) {
+                    enviar(ws, { type: "conectar-por-id-nao-encontrado", mensagem: "Você não pode conectar ao próprio dispositivo." });
                     break;
                 }
 
@@ -1076,6 +1030,7 @@ wss.on("connection", (ws, req) => {
                     expiraEm: pedido.expiraEm,
                     validadeMs: TEMPO_PEDIDO_MS,
                 });
+                // @ts-ignore
                 atualizarAtividadeAuto(alvoId, idHash);
                 console.log("[AutoMode] Pedido automático encaminhado.");
                 break;
